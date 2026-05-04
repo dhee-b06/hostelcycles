@@ -1,4 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  collection, 
+  query, 
+  deleteDoc,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
 import { 
   Search, 
   PlusCircle, 
@@ -12,29 +29,22 @@ import {
   CreditCard,
   Sun,
   Moon,
-  Mail,
   Recycle,
-  Heart,
   Bike,
   ShieldCheck,
   ChevronLeft,
-  ExternalLink,
   ShieldAlert,
   UserCheck,
-  Terminal,
   Upload,
   MessageCircle,
-  Phone,
-  Instagram,
-  Globe,
-  Coffee
+  HelpCircle
 } from 'lucide-react';
 
+// --- INITIAL DATA & CONSTANTS ---
 const DEFAULT_AVATAR = "https://api.dicebear.com/7.x/avataaars/svg?seed=Felix";
-
 const INITIAL_CYCLES = [
   {
-    id: 1,
+    id: "1",
     brand: "Hercules",
     model: "Roadeo A50",
     price: 4500,
@@ -46,7 +56,7 @@ const INITIAL_CYCLES = [
     verified: true,
   },
   {
-    id: 2,
+    id: "2",
     brand: "Btwin",
     model: "Rockrider ST10",
     price: 7200,
@@ -59,28 +69,79 @@ const INITIAL_CYCLES = [
   }
 ];
 
-export default function App() {
+// --- FIREBASE INITIALIZATION ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'hostel-cycles-default';
+
+const App = () => {
+  const [user, setUser] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [view, setView] = useState('browse');
   const [searchQuery, setSearchQuery] = useState('');
-  const [cycles, setCycles] = useState(INITIAL_CYCLES);
+  const [cycles, setCycles] = useState([]);
   const [bag, setBag] = useState([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
-  
   const [adminAvatar, setAdminAvatar] = useState(DEFAULT_AVATAR);
-  
   const [sellForm, setSellForm] = useState({ brand: '', model: '', price: '', whatsapp: '', color: '', condition: 'Good', image: null });
   const [handoverMethod, setHandoverMethod] = useState('cod');
+  const [filters, setFilters] = useState({ maxPrice: 20000, condition: 'All', brand: 'All', color: 'All' });
 
-  const [filters, setFilters] = useState({
-    maxPrice: 20000,
-    condition: 'All',
-    brand: 'All',
-    color: 'All'
-  });
+  // 1. AUTHENTICATION (Rule 3)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
 
+  // 2. DATA SYNC (Rule 1 & 2)
+  useEffect(() => {
+    if (!user) return;
+
+    // Sync Cycles
+    const cyclesRef = collection(db, 'artifacts', appId, 'public', 'data', 'cycles');
+    const unsubscribeCycles = onSnapshot(cyclesRef, (snapshot) => {
+      const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // If DB is empty, initialize with defaults
+      if (items.length === 0 && snapshot.metadata.fromCache === false) {
+        INITIAL_CYCLES.forEach(async (c) => {
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'cycles', c.id), c);
+        });
+      } else {
+        setCycles(items);
+      }
+    }, (err) => console.error("Firestore Error (Cycles):", err));
+
+    // Sync Admin Profile
+    const profileRef = doc(db, 'artifacts', appId, 'public', 'data', 'profile', 'admin');
+    const unsubscribeProfile = onSnapshot(profileRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setAdminAvatar(snapshot.data().avatar || DEFAULT_AVATAR);
+      }
+    }, (err) => console.error("Firestore Error (Profile):", err));
+
+    return () => {
+      unsubscribeCycles();
+      unsubscribeProfile();
+    };
+  }, [user]);
+
+  // Handle Search for Admin Mode
   useEffect(() => {
     const trigger = searchQuery.trim().toLowerCase();
     if (trigger === 'pixrad@2007') {
@@ -110,18 +171,29 @@ export default function App() {
 
   const removeFromBag = (id) => setBag(bag.filter(item => item.id !== id));
 
-  const handleListing = (e) => {
+  const handleListing = async (e) => {
     e.preventDefault();
+    if (!user) return;
+    const newId = Date.now().toString();
     const newCycle = { 
-      ...sellForm, 
-      id: Date.now(), 
+      brand: sellForm.brand,
+      model: sellForm.model,
+      price: Number(sellForm.price),
+      whatsapp: sellForm.whatsapp,
+      color: sellForm.color,
+      condition: sellForm.condition,
       verified: false, 
       seller: "Student User",
       image: sellForm.image || "https://images.unsplash.com/photo-1485965120184-e220f721d03e?q=80&w=1000&auto=format&fit=crop"
     };
-    setCycles([newCycle, ...cycles]);
-    setView('browse');
-    setSellForm({ brand: '', model: '', price: '', whatsapp: '', color: '', condition: 'Good', image: null });
+    
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'cycles', newId), newCycle);
+      setView('browse');
+      setSellForm({ brand: '', model: '', price: '', whatsapp: '', color: '', condition: 'Good', image: null });
+    } catch (err) {
+      console.error("Upload error:", err);
+    }
   };
 
   const handleImageUpload = (e) => {
@@ -133,26 +205,38 @@ export default function App() {
     }
   };
 
-  const handleAvatarUpload = (e) => {
+  const handleAvatarUpload = async (e) => {
     const file = e.target.files[0];
-    if (file) {
+    if (file && user) {
       const reader = new FileReader();
-      reader.onloadend = () => setAdminAvatar(reader.result);
+      reader.onloadend = async () => {
+        const base64 = reader.result;
+        setAdminAvatar(base64);
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'profile', 'admin'), { avatar: base64 }, { merge: true });
+      };
       reader.readAsDataURL(file);
     }
   };
 
-  const deleteCycle = (id) => setCycles(cycles.filter(c => c.id !== id));
-  const toggleVerify = (id) => {
-    setCycles(cycles.map(c => c.id === id ? { ...c, verified: !c.verified } : c));
+  const deleteCycle = async (id) => {
+    if (!user) return;
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'cycles', id));
+  };
+
+  const toggleVerify = async (id) => {
+    if (!user) return;
+    const cycle = cycles.find(c => c.id === id);
+    if (cycle) {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'cycles', id), { ...cycle, verified: !cycle.verified }, { merge: true });
+    }
   };
 
   const brandOptions = useMemo(() => ['All', ...new Set(cycles.map(c => c.brand))], [cycles]);
   const colorOptions = useMemo(() => ['All', ...new Set(cycles.map(c => c.color))], [cycles]);
 
   const filteredCycles = cycles.filter(c => {
-    const matchesSearch = c.brand.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                         c.model.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = c.brand?.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                         c.model?.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesPrice = Number(c.price) <= filters.maxPrice;
     const matchesCondition = filters.condition === 'All' || c.condition === filters.condition;
     const matchesBrand = filters.brand === 'All' || c.brand === filters.brand;
@@ -161,11 +245,6 @@ export default function App() {
   });
 
   const totalValue = bag.reduce((acc, curr) => acc + Number(curr.price), 0);
-
-  const contactSupport = () => {
-    const message = encodeURIComponent("Hi Support! I have a query regarding HostelCycles marketplace.");
-    window.open(`https://wa.me/6296039058?text=${message}`, '_blank');
-  };
 
   return (
     <div className={`min-h-screen font-sans transition-colors duration-500 ${isDarkMode ? 'bg-[#020617] text-white' : 'bg-slate-50 text-slate-900'}`}>
@@ -215,14 +294,35 @@ export default function App() {
         </div>
       </nav>
 
+      {/* Admin Auth Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-6">
+          <div className={`w-full max-w-md p-8 rounded-[40px] border ${isDarkMode ? 'bg-[#0A0D1E] border-white/10' : 'bg-white border-slate-200'}`}>
+            <h2 className="text-3xl font-black italic tracking-tighter mb-6">Admin Access</h2>
+            <input 
+              type="password" 
+              placeholder="Enter Admin Password" 
+              className={`w-full px-6 py-4 rounded-2xl mb-4 outline-none border ${isDarkMode ? 'bg-white/5 border-white/10 text-white' : 'bg-slate-50 border-slate-200'}`}
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+            />
+            <div className="flex gap-4">
+              <button onClick={handleLogin} className="flex-1 py-4 bg-yellow-500 text-black font-black rounded-2xl">Unlock</button>
+              <button onClick={() => setShowAuthModal(false)} className="flex-1 py-4 bg-white/5 font-black rounded-2xl">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="pt-24 pb-20 max-w-7xl mx-auto px-6">
         {view === 'browse' && (
-          <div className="space-y-8 animate-in fade-in duration-500">
+          <div className="space-y-8">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div className="relative h-20 rounded-[20px] overflow-hidden bg-gradient-to-br from-yellow-500 to-orange-500 px-8 flex flex-col justify-center shadow-2xl shadow-yellow-500/10 transition-all hover:shadow-yellow-500/20 group">
                 <div className="flex items-center justify-between z-10">
                   <h2 className="text-2xl font-black text-black italic tracking-tighter group-hover:translate-x-1 transition-transform">Cycle Smarter.</h2>
-                  <p className="text-black/80 text-[14px] font-bold text-right hidden sm:block">VIT's P2P marketplace for cycles</p>
+                  <p className="text-black/80 text-[14px] font-bold text-right hidden sm:block">VIT's Cloud P2P Marketplace</p>
                 </div>
                 <div className="absolute -bottom-6 -right-6 opacity-10 rotate-12 group-hover:scale-110 transition-transform duration-700">
                   <Bike size={100} className="text-black" />
@@ -233,9 +333,9 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Recycle size={18} className="text-yellow-500" />
-                    <h3 className="text-2xl font-black italic text-white tracking-tighter">Ready to Ride?</h3>
+                    <h3 className={`text-2xl font-black italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Ready to Ride?</h3>
                   </div>
-                  <span className="text-yellow-500 font-black uppercase tracking-[0.2em] text-[8px] hidden sm:block">Campus Safe Ecosystem with circular economy and sustainability kept in mind</span>
+                  <span className="text-yellow-500 font-black uppercase tracking-[0.2em] text-[8px] hidden sm:block">Real-time Cross-Device Syncing Enabled</span>
                 </div>
               </div>
             </div>
@@ -249,7 +349,7 @@ export default function App() {
                 <input 
                   type="range" min="500" max="20000" step="500"
                   className="w-full accent-yellow-500 h-1 bg-slate-700/30 rounded-lg cursor-pointer"
-                  value={filters.maxPrice} onChange={(e) => setFilters({...filters, maxPrice: e.target.value})}
+                  value={filters.maxPrice} onChange={(e) => setFilters({...filters, maxPrice: Number(e.target.value)})}
                 />
               </div>
               {[
@@ -280,15 +380,15 @@ export default function App() {
                     </div>
                     <div className="px-2">
                       <div className="flex justify-between items-start mb-1">
-                        <div>
-                          <h4 className="font-black text-lg leading-tight italic tracking-tighter">{cycle.brand}</h4>
+                        <div className="overflow-hidden">
+                          <h4 className="font-black text-lg leading-tight italic tracking-tighter truncate">{cycle.brand}</h4>
                           <p className={`text-[10px] font-bold ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>{cycle.model}</p>
                         </div>
-                        <p className="text-yellow-500 font-black text-lg">₹{cycle.price}</p>
+                        <p className="text-yellow-500 font-black text-lg shrink-0">₹{cycle.price}</p>
                       </div>
                       <div className="flex gap-2 mb-6">
-                        <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>{cycle.color}</span>
-                        <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'bg-white/5 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>{cycle.condition}</span>
+                        <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{cycle.color}</span>
+                        <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{cycle.condition}</span>
                       </div>
                       <button 
                         onClick={() => toggleBag(cycle)}
@@ -306,7 +406,7 @@ export default function App() {
         )}
 
         {view === 'admin' && (
-          <div className="space-y-8 animate-in slide-in-from-left-8 duration-500">
+          <div className="space-y-8">
             <div className={`p-10 rounded-[56px] border ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
               <div className="flex flex-col md:flex-row items-center justify-between gap-8">
                 <div className="flex items-center gap-6 text-center md:text-left">
@@ -323,7 +423,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex gap-4">
-                  <button onClick={() => setView('browse')} className="flex items-center gap-2 px-8 py-4 rounded-[24px] font-black text-sm border border-white/10 hover:bg-white/5 transition-colors">
+                  <button onClick={() => setView('browse')} className={`flex items-center gap-2 px-8 py-4 rounded-[24px] font-black text-sm border hover:bg-white/5 transition-colors ${isDarkMode ? 'border-white/10' : 'border-slate-200'}`}>
                     <ChevronLeft size={18} /> Exit Admin
                   </button>
                 </div>
@@ -347,7 +447,7 @@ export default function App() {
                         <div className="flex items-center gap-6">
                           <img src={c.image} className="w-16 h-16 rounded-2xl object-cover shadow-2xl" />
                           <div>
-                            <p className="font-black text-lg italic leading-tight tracking-tighter">{c.brand} {c.model}</p>
+                            <p className={`font-black text-lg italic leading-tight tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{c.brand} {c.model}</p>
                             <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">ID: {c.id.toString().slice(-6)} • Seller: {c.seller}</p>
                           </div>
                         </div>
@@ -375,14 +475,14 @@ export default function App() {
         )}
 
         {view === 'sell' && (
-          <div className="max-w-4xl mx-auto animate-in fade-in slide-in-from-bottom-8 duration-500">
+          <div className="max-w-4xl mx-auto">
             <div className={`p-12 rounded-[64px] border ${isDarkMode ? 'bg-[#0A0D1E] border-white/5 shadow-2xl' : 'bg-white border-slate-200 shadow-xl'}`}>
               <div className="flex items-center justify-between mb-12">
                 <div>
-                  <h2 className="text-5xl font-black italic tracking-tighter mb-2">Sell Your Cycle.</h2>
+                  <h2 className={`text-5xl font-black italic tracking-tighter mb-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Sell Your Cycle.</h2>
                   <p className="text-[10px] font-black uppercase text-yellow-500 tracking-[0.2em]">Contact the admin for verification</p>
                 </div>
-                <button onClick={() => setView('browse')} className="p-4 rounded-3xl bg-white/5 text-slate-500 hover:text-red-500 transition-colors">
+                <button onClick={() => setView('browse')} className={`p-4 rounded-3xl transition-colors ${isDarkMode ? 'bg-white/5 text-slate-500 hover:text-red-500' : 'bg-slate-100 text-slate-400 hover:text-red-500'}`}>
                   <X size={32} />
                 </button>
               </div>
@@ -428,10 +528,10 @@ export default function App() {
         )}
 
         {view === 'bag' && (
-          <div className="max-w-7xl mx-auto px-6 animate-in fade-in slide-in-from-right-8 duration-500">
+          <div className="max-w-7xl mx-auto px-6">
              <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
               <div className="lg:col-span-7 space-y-8">
-                <h2 className="text-5xl font-black italic tracking-tighter mb-4">Bag.</h2>
+                <h2 className={`text-5xl font-black italic tracking-tighter mb-4 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Bag.</h2>
                 {bag.length === 0 ? (
                   <div className={`border rounded-[56px] p-24 text-center ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'}`}>
                     <div className="bg-white/5 w-20 h-20 rounded-[32px] flex items-center justify-center mx-auto mb-8"><ShoppingBag size={40} className="text-slate-700" /></div>
@@ -443,7 +543,7 @@ export default function App() {
                     <div key={item.id} className={`group border rounded-[48px] p-8 flex flex-col sm:flex-row gap-8 items-center ${isDarkMode ? 'bg-white/5 border-white/10 hover:border-white/20' : 'bg-white border-slate-200 shadow-xl'}`}>
                       <img src={item.image} className="w-32 h-32 rounded-[32px] object-cover shadow-2xl ring-4 ring-white/5" alt={item.model} />
                       <div className="flex-1 text-center sm:text-left">
-                        <h4 className="text-2xl font-black italic tracking-tighter">{item.brand} {item.model}</h4>
+                        <h4 className={`text-2xl font-black italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{item.brand} {item.model}</h4>
                         <p className="text-yellow-500 font-black text-xl mt-1">₹{item.price}</p>
                         <div className="flex gap-2 mt-4 justify-center sm:justify-start">
                            <span className="text-[10px] font-black uppercase text-slate-500 tracking-widest">{item.condition}</span>
@@ -451,7 +551,7 @@ export default function App() {
                            <span className="text-[10px] font-black uppercase text-slate-500 tracking-widest">{item.color}</span>
                         </div>
                       </div>
-                      <button onClick={() => removeFromBag(item.id)} className="p-5 text-slate-600 hover:text-red-500 bg-white/5 rounded-3xl transition-all"><Trash2 size={28} /></button>
+                      <button onClick={() => removeFromBag(item.id)} className={`p-5 rounded-3xl transition-all ${isDarkMode ? 'text-slate-600 hover:text-red-500 bg-white/5' : 'text-slate-400 hover:text-red-500 bg-slate-50'}`}><Trash2 size={28} /></button>
                     </div>
                   ))
                 )}
@@ -459,20 +559,20 @@ export default function App() {
 
               {bag.length > 0 && (
                 <div className={`lg:col-span-5 border rounded-[56px] p-10 transition-colors shadow-[0_32px_64px_-12px_rgba(0,0,0,0.5)] ${isDarkMode ? 'bg-[#0A0D1E] border-white/5' : 'bg-white border-slate-200 shadow-2xl'}`}>
-                  <h3 className="text-3xl font-black mb-10 italic tracking-tighter">Handover Flow</h3>
+                  <h3 className={`text-3xl font-black mb-10 italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Handover Flow</h3>
                   <div className="space-y-6 mb-12">
                     <div onClick={() => setHandoverMethod('cod')} className={`p-8 rounded-[40px] border-2 cursor-pointer transition-all flex items-center gap-6 group ${handoverMethod === 'cod' ? 'border-yellow-500 bg-yellow-500/5' : (isDarkMode ? 'border-white/5 hover:bg-white/5' : 'border-slate-100')}`}>
                       <div className={`w-16 h-16 rounded-[24px] flex items-center justify-center transition-all ${handoverMethod === 'cod' ? 'bg-yellow-500 text-black shadow-2xl shadow-yellow-500/30' : 'bg-slate-800 text-slate-500'}`}><CreditCard size={32} /></div>
                       <div>
-                        <p className="font-black text-xl italic tracking-tighter">UPI (contact seller after that)</p>
-                        <p className={`text-xs font-bold tracking-wide italic mt-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Best for direct campus meetups</p>
+                        <p className={`font-black text-xl italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>UPI (Direct Campus Meetup)</p>
+                        <p className={`text-xs font-bold tracking-wide italic mt-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Scan & Pay during handover</p>
                       </div>
                     </div>
                     <div onClick={() => setHandoverMethod('location')} className={`p-8 rounded-[40px] border-2 cursor-pointer transition-all flex items-center gap-6 group ${handoverMethod === 'location' ? 'border-yellow-500 bg-yellow-500/5' : (isDarkMode ? 'border-white/5 hover:bg-white/5' : 'border-slate-100')}`}>
                       <div className={`w-16 h-16 rounded-[24px] flex items-center justify-center transition-all ${handoverMethod === 'location' ? 'bg-yellow-500 text-black shadow-2xl shadow-yellow-500/30' : 'bg-slate-800 text-slate-500'}`}><MapPin size={32} /></div>
                       <div>
-                        <p className="font-black text-xl italic tracking-tighter">cash (contact seller after that)</p>
-                        <p className={`text-xs font-bold tracking-wide italic mt-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>If seller is not in VIT anymore (placed/interning) then attempt a money order from post office, VIT. </p>
+                        <p className={`font-black text-xl italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Cash (On-Site Handover)</p>
+                        <p className={`text-xs font-bold tracking-wide italic mt-1 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Recommended for VIT Vellore campus</p>
                       </div>
                     </div>
                   </div>
@@ -492,97 +592,39 @@ export default function App() {
         )}
       </main>
 
-      {/* FOOTER AREA */}
-      <footer className={`mt-auto pt-24 pb-12 px-6 border-t transition-colors ${isDarkMode ? 'bg-[#020617] border-white/5' : 'bg-slate-50 border-slate-200'}`}>
+      <footer className={`mt-auto pt-20 pb-12 px-6 border-t transition-colors ${isDarkMode ? 'bg-[#020617] border-white/5' : 'bg-slate-50 border-slate-200'}`}>
         <div className="max-w-7xl mx-auto">
-          {/* Logo Section */}
-          <div className="flex flex-col md:flex-row items-center justify-between gap-8 mb-16">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 bg-yellow-500 rounded-2xl flex items-center justify-center shadow-2xl shadow-yellow-500/20">
-                <Bike className="text-black w-7 h-7" />
-              </div>
-              <div>
-                <h2 className={`text-3xl font-black tracking-tighter italic ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>HostelCycles</h2>
-                <p className={`text-[10px] font-black uppercase tracking-[0.3em] ${isDarkMode ? 'text-slate-600' : 'text-slate-400'}`}>VIT Vellore Student Hub</p>
-              </div>
+          <div className="flex flex-col items-center gap-8">
+            <div className="flex items-center gap-2">
+               <div className="w-6 h-6 bg-yellow-500 rounded-md flex items-center justify-center"><Bike size={14} className="text-black"/></div>
+               <p className={`text-sm font-black italic tracking-tighter ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>HostelCycles Cloud</p>
             </div>
-            {/* Buy Me a Coffee Button */}
-            <button 
-              onClick={() => window.open('https://wa.me/6296039058?text=Hey! I really like HostelCycles. Coffee is on me! ☕', '_blank')}
-              className="flex items-center gap-3 px-6 py-4 rounded-2xl bg-orange-500/10 border border-orange-500/20 text-orange-500 font-black text-sm hover:bg-orange-500 hover:text-black transition-all active:scale-95 group shadow-lg shadow-orange-500/5"
+            
+            <a 
+              href="https://wa.me/6296039058?text=Hello%20HostelCycles%20Support%2C%20I%20need%20help%20with..."
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`flex items-center gap-3 px-8 py-4 rounded-[24px] transition-all active:scale-95 border-2 ${isDarkMode ? 'bg-white/5 border-white/5 hover:bg-white/10 text-white shadow-2xl' : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-900 shadow-xl'}`}
             >
-              <Coffee size={20} className="group-hover:rotate-12 transition-transform" />
-              Buy me a coffee
-            </button>
-          </div>
+              <div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center shadow-lg shadow-green-500/20">
+                <HelpCircle className="text-white" size={20} />
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest leading-none mb-1">Support & Verification</p>
+                <p className="text-sm font-black italic tracking-tight"> Contact for any issues </p>
+              </div>
+              <MessageCircle size={20} className="ml-4 text-green-500" />
+            </a>
 
-          {/* Lead Support Section */}
-          <div className={`p-10 rounded-[56px] border ${isDarkMode ? 'bg-white/5 border-white/10' : 'bg-white border-slate-200'} mb-16`}>
-            <div className="flex flex-col lg:flex-row items-center lg:items-start gap-10">
-              <div className="relative group shrink-0 self-center lg:self-start">
-                <div className="w-32 h-32 rounded-[40px] overflow-hidden border-4 border-yellow-500 shadow-2xl">
-                  <img 
-                    src={adminAvatar} 
-                    className="w-full h-full object-cover transition-transform group-hover:scale-110" 
-                    alt="Lead Support" 
-                    onError={(e) => e.target.src = DEFAULT_AVATAR}
-                  />
-                </div>
-                <div className="absolute -bottom-2 -right-2 bg-yellow-500 text-black p-2 rounded-xl">
-                  <Heart size={16} fill="currentColor" />
-                </div>
-              </div>
-              <div className="flex-1 text-center lg:text-left">
-                <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3 mb-2">
-                  <span className="bg-yellow-500 text-black px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest">Lead Support</span>
-                  <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${isDarkMode ? 'bg-white/10' : 'bg-slate-100'}`}>Chem-Eng 2028</span>
-                </div>
-                <h3 className="text-3xl font-black italic tracking-tighter mb-4">Dheemayee Bhadra</h3>
-                <p className={`text-sm font-bold leading-relaxed max-w-xl ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                  Managing campus logistics, verification protocols, and student support. 
-                  Reach out for listing approvals or marketplace assistance.
-                </p>
-                <div className="mt-8">
-                  <button 
-                    onClick={contactSupport}
-                    className="inline-flex items-center justify-center gap-3 px-8 py-5 bg-yellow-500 text-black rounded-3xl font-black text-sm active:scale-95 transition-all shadow-xl shadow-yellow-500/20"
-                  >
-                    <MessageCircle size={18} /> Contact Support
-                  </button>
-                </div>
-              </div>
+            <div className="text-center space-y-1">
+              <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Built for VITians • Made By Dheemayee Bhadra</p>
+              <p className={`text-[9px] font-bold ${isDarkMode ? 'text-white/20' : 'text-slate-300'}`}>© 2024 HostelCycles Marketplace Protocol</p>
             </div>
-          </div>
-
-          {/* System Credits */}
-          <div className="flex items-start justify-start py-8 border-t border-white/5">
-            <p className={`text-[10px] font-black uppercase tracking-[0.6em] transition-colors ${isDarkMode ? 'text-slate-800 hover:text-slate-600' : 'text-slate-300 hover:text-slate-400'}`}>
-              PIXRAD LABS SYSTEM • MMXXIV
-            </p>
           </div>
         </div>
       </footer>
-
-      {/* Admin Gateway Modal */}
-      {showAuthModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-[#020617]/95 backdrop-blur-3xl animate-in zoom-in-95 duration-300">
-          <div className={`w-full max-w-md rounded-[64px] p-12 relative text-center shadow-[0_80px_160px_-20px_rgba(0,0,0,1)] border ${isDarkMode ? 'bg-[#0A0D1E] border-white/10' : 'bg-white border-slate-200'}`}>
-            <button onClick={() => setShowAuthModal(false)} className="absolute top-10 right-10 text-slate-600 hover:text-red-500 transition-colors p-2 rounded-2xl hover:bg-white/5"><X size={28} /></button>
-            <div className="w-16 h-16 bg-yellow-500/10 rounded-3xl flex items-center justify-center mx-auto mb-8"><Terminal size={32} className="text-yellow-500" /></div>
-            <div className="relative group w-36 h-36 mx-auto mb-10">
-              <div className="w-full h-full rounded-[48px] overflow-hidden border-4 border-yellow-500 shadow-2xl relative ring-8 ring-yellow-500/10">
-                <img src={adminAvatar} className="w-full h-full object-cover" alt="Admin Preview" />
-              </div>
-            </div>
-            <h2 className="text-4xl font-black mb-1 italic tracking-tighter text-white">System Access.</h2>
-            <p className="text-[10px] font-black text-slate-500 mb-10 uppercase tracking-[0.3em]">Administrator Privileges Required</p>
-            <div className="space-y-4">
-              <input type="password" placeholder="••••••••" className={`w-full rounded-[28px] px-8 py-5 outline-none focus:ring-4 ring-yellow-500/10 mb-2 text-2xl tracking-[0.3em] text-center font-mono ${isDarkMode ? 'bg-white/5 border border-white/10 text-white placeholder:text-slate-700' : 'bg-slate-100 border border-slate-200 text-slate-900'}`} value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleLogin()} autoFocus />
-              <button onClick={handleLogin} className={`w-full py-5 rounded-[28px] font-black text-xl active:scale-95 transition-all shadow-xl ${isDarkMode ? 'bg-yellow-500 text-black hover:bg-yellow-400' : 'bg-slate-900 text-white'}`}>Unlock Terminal</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
-}
+};
+
+export default App;
