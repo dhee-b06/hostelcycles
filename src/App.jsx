@@ -70,7 +70,7 @@ const INITIAL_CYCLES = [
 ];
 
 // --- FIREBASE INITIALIZATION ---
-const firebaseConfig = JSON.parse(__firebase_config);
+const firebaseConfig = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
